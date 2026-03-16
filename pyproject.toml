@@ -1,0 +1,11 @@
+[project]
+name = "fix"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "binance-fix-connector>=1.2.0",
+    "cryptography>=46.0.5",
+    "simplefix>=1.0.17",
+]
