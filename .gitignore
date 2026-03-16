@@ -4,3 +4,9 @@ config.ini
 __pycache__/
 *.pyc
 .venv/
+log/
+store/
+node_modules/
+.next/
+frontend/.next/
+frontend/node_modules/
