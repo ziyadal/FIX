@@ -7,7 +7,7 @@ const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
 export function useWebSocket<T>(path: string, onMessage: (data: T) => void) {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
 
