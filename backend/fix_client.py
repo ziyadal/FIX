@@ -86,6 +86,15 @@ class FixClient:
                 pass
         if self._session:
             try:
+                # Send FIX Logout (35=5) so Binance releases the SenderCompID
+                logout_msg = self._session.create_fix_message_with_basic_header("5")
+                self._session.send_message(logout_msg)
+                logger.info("Sent FIX Logout message (35=5)")
+                # Wait briefly for Binance's Logout response before closing
+                await asyncio.sleep(2)
+            except Exception:
+                logger.exception("Error sending FIX Logout")
+            try:
                 await asyncio.to_thread(self._session.disconnect)
             except Exception:
                 logger.exception("Error during disconnect")
@@ -97,7 +106,7 @@ class FixClient:
     async def _poll_messages(self) -> None:
         while True:
             try:
-                if self._session:
+                if self._session and self._state == ConnectionState.CONNECTED:
                     messages = await asyncio.to_thread(
                         self._session.get_all_new_messages_received
                     )
@@ -105,6 +114,11 @@ class FixClient:
                         await self._handle_message(msg)
             except asyncio.CancelledError:
                 raise
+            except (OSError, ConnectionError) as e:
+                # Socket-level error means the connection is dead
+                logger.warning("Connection lost: %s", e)
+                self._state = ConnectionState.DISCONNECTED
+                self._subscriptions.clear()
             except Exception:
                 logger.exception("Error in message polling loop")
             await asyncio.sleep(0.1)
@@ -137,9 +151,15 @@ class FixClient:
                 "type": "maintenance",
                 "headline": parsed["tags"].get(148, "Server maintenance"),
             })
+        elif msg_type == "5":
+            # Logout from Binance — session is no longer valid
+            logger.warning("Received FIX Logout: %s", parsed["tags"].get(58, ""))
+            self._state = ConnectionState.DISCONNECTED
+            self._subscriptions.clear()
         elif msg_type == "3":
-            logger.error("Reject: reason=%s ref_tag=%s",
-                         parsed["tags"].get(373, "?"), parsed["tags"].get(371, "?"))
+            logger.error("Reject: reason=%s ref_tag=%s text=%s",
+                         parsed["tags"].get(373, "?"), parsed["tags"].get(371, "?"),
+                         parsed["tags"].get(58, "?"))
 
     async def _handle_snapshot(self, parsed: dict) -> None:
         tags = parsed["tags"]
@@ -247,7 +267,7 @@ class FixClient:
         })
 
     def _send_and_broadcast(self, msg: FixMessage) -> None:
-        if not self._session:
+        if not self._session or self._state != ConnectionState.CONNECTED:
             return
         self._session.send_message(msg)
 
@@ -264,7 +284,7 @@ class FixClient:
         })
 
     async def request_instrument_list(self) -> None:
-        if not self._session:
+        if not self._session or self._state != ConnectionState.CONNECTED:
             raise RuntimeError("Not connected")
         msg = self._session.create_fix_message_with_basic_header("x")
         msg.append_pair(320, str(uuid.uuid4())[:8])
@@ -272,7 +292,7 @@ class FixClient:
         await self._send_message(msg)
 
     async def subscribe(self, symbol: str, depth: int = 10) -> str:
-        if not self._session:
+        if not self._session or self._state != ConnectionState.CONNECTED:
             raise RuntimeError("Not connected")
         if symbol in self._subscriptions:
             return self._subscriptions[symbol]
@@ -292,7 +312,7 @@ class FixClient:
         return req_id
 
     async def unsubscribe(self, symbol: str) -> None:
-        if not self._session:
+        if not self._session or self._state != ConnectionState.CONNECTED:
             raise RuntimeError("Not connected")
         req_id = self._subscriptions.pop(symbol, None)
         if not req_id:
@@ -305,7 +325,7 @@ class FixClient:
         self._order_books.pop(symbol, None)
 
     async def request_limits(self) -> None:
-        if not self._session:
+        if not self._session or self._state != ConnectionState.CONNECTED:
             raise RuntimeError("Not connected")
         msg = self._session.create_fix_message_with_basic_header("XLQ")
         await self._send_message(msg)

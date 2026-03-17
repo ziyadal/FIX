@@ -1,6 +1,6 @@
 """Market data subscribe/unsubscribe and status endpoints."""
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["market_data"])
@@ -20,12 +20,18 @@ class UnsubscribeRequest(BaseModel):
 
 @router.post("/subscribe")
 async def subscribe(req: SubscribeRequest):
-    req_id = await _fix_client.subscribe(req.symbol, req.depth)
+    try:
+        req_id = await _fix_client.subscribe(req.symbol, req.depth)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="FIX session not connected")
     return {"status": "subscribed", "symbol": req.symbol, "req_id": req_id}
 
 @router.post("/unsubscribe")
 async def unsubscribe(req: UnsubscribeRequest):
-    await _fix_client.unsubscribe(req.symbol)
+    try:
+        await _fix_client.unsubscribe(req.symbol)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="FIX session not connected")
     return {"status": "unsubscribed", "symbol": req.symbol}
 
 @router.get("/status")

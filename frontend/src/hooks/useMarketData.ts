@@ -1,16 +1,20 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useWebSocket } from "./useWebSocket";
+import { api } from "@/lib/api";
 import type { FIXMessage, MarketDataUpdate, OrderBook } from "@/lib/types";
 
 const MAX_FIX_MESSAGES = 500;
+const STATUS_POLL_INTERVAL = 5000;
 
 export function useMarketData() {
   const [orderBooks, setOrderBooks] = useState<Record<string, OrderBook>>({});
   const [fixMessages, setFixMessages] = useState<FIXMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [maintenance, setMaintenance] = useState(false);
+  const [fixConnected, setFixConnected] = useState(false);
+  const fixConnectedRef = useRef(false);
 
   const handleMarketData = useCallback((data: MarketDataUpdate) => {
     if (data.type === "snapshot" && data.symbol) {
@@ -50,10 +54,31 @@ export function useMarketData() {
   }, []);
 
   const { connected: mdConnected } = useWebSocket<MarketDataUpdate>("/ws/market-data", handleMarketData);
-  const { connected: fixConnected } = useWebSocket<FIXMessage>("/ws/fix-messages", handleFixMessage);
+  const { connected: fixWsConnected } = useWebSocket<FIXMessage>("/ws/fix-messages", handleFixMessage);
+
+  // Poll /api/status to track actual FIX connection state
+  useEffect(() => {
+    let mounted = true;
+    const poll = async () => {
+      try {
+        const status = await api.getStatus();
+        if (!mounted) return;
+        const isConnected = status.state === "connected";
+        setFixConnected(isConnected);
+        fixConnectedRef.current = isConnected;
+      } catch {
+        if (!mounted) return;
+        setFixConnected(false);
+        fixConnectedRef.current = false;
+      }
+    };
+    poll();
+    const id = setInterval(poll, STATUS_POLL_INTERVAL);
+    return () => { mounted = false; clearInterval(id); };
+  }, []);
 
   const clearError = useCallback(() => setError(null), []);
   const clearMaintenance = useCallback(() => setMaintenance(false), []);
 
-  return { orderBooks, fixMessages, error, maintenance, connected: mdConnected && fixConnected, clearError, clearMaintenance };
+  return { orderBooks, fixMessages, error, maintenance, connected: mdConnected && fixConnected, fixConnected, fixConnectedRef, clearError, clearMaintenance };
 }

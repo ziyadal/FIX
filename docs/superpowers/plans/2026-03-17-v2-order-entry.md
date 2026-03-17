@@ -4,7 +4,7 @@
 
 **Goal:** Add full order entry to the FIX trading terminal — place Limit/Market orders, cancel, cancel/replace, mass-cancel, and see live order status in a blotter.
 
-**Architecture:** Two parallel FIX sessions: existing `FixClient` for market data (fix-md) + new `FixOrderEntryClient` for order entry (fix-oe). Both run at startup. ExecutionReports and OrderCancelRejects are multiplexed into the existing `/ws/market-data` WebSocket channel using a `type` field. No new WebSocket connection needed on the frontend.
+**Architecture:** Two parallel FIX sessions: existing `FixClient` for market data (fix-md) + new `FixOrderEntryClient` for order entry (fix-oe). Both run at startup. Each session has its own dedicated WebSocket channel: `/ws/market-data` for price/orderbook updates, `/ws/orders` for ExecutionReports and OrderCancelRejects. The frontend opens two separate WebSocket connections — `useMarketData` connects to `/ws/market-data`, `useOrderEntry` connects to `/ws/orders` independently.
 
 **Tech Stack:** Python/FastAPI/binance_fix_connector (backend), React/Next.js/Tailwind/TypeScript (frontend), existing WebSocketManager and `init_router` pattern throughout.
 
@@ -24,8 +24,8 @@
 | `backend/tests/test_order_entry_routes.py` | **Create** | Tests for all 5 order entry endpoints |
 | `frontend/src/lib/types.ts` | Modify | Add `OrderState`, `PlaceOrderRequest`, `ModifyOrderRequest`; extend `MarketDataUpdate` |
 | `frontend/src/lib/api.ts` | Modify | Add `placeOrder`, `cancelOrder`, `modifyOrder`, `massCancel`, `getOrders` |
-| `frontend/src/hooks/useMarketData.ts` | Modify | Forward `execution_report` / `order_cancel_reject` events via `onOrderEvent` callback |
-| `frontend/src/hooks/useOrderEntry.ts` | **Create** | Manage orders map, expose place/cancel/modify/massCancel, process incoming reports |
+| `frontend/src/hooks/useMarketData.ts` | Modify | No order event changes — connects to `/ws/market-data` only |
+| `frontend/src/hooks/useOrderEntry.ts` | **Create** | Manage orders map, expose place/cancel/modify/massCancel; opens own WebSocket to `/ws/orders` |
 | `frontend/src/components/OrderEntry.tsx` | **Create** | Form: Symbol, Side, OrdType, Qty, Price, TIF — submits to REST |
 | `frontend/src/components/OrderBlotter.tsx` | **Create** | Live orders table with cancel/modify actions, status color-coding, flash on change |
 | `frontend/src/components/ModifyOrderModal.tsx` | **Create** | Modal pre-filled with current Qty/Price, calls PUT /api/orders/:id |
@@ -330,14 +330,14 @@ class FixOrderEntryClient:
             "timestamp": tags.get(52, ""),
         }
         self._update_order(report)
-        await self._ws_manager.broadcast("market-data", {
+        await self._ws_manager.broadcast("orders", {
             "type": "execution_report",
             "order": report,
         })
 
     async def _handle_cancel_reject(self, parsed: dict) -> None:
         tags = parsed["tags"]
-        await self._ws_manager.broadcast("market-data", {
+        await self._ws_manager.broadcast("orders", {
             "type": "order_cancel_reject",
             "cl_ord_id": tags.get(11, ""),
             "orig_cl_ord_id": tags.get(41, ""),
@@ -720,6 +720,15 @@ def create_app(
         except WebSocketDisconnect:
             ws_manager.disconnect(websocket, "market-data")
 
+    @app.websocket("/ws/orders")
+    async def ws_orders(websocket: WebSocket):
+        await ws_manager.connect(websocket, "orders")
+        try:
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            ws_manager.disconnect(websocket, "orders")
+
     @app.websocket("/ws/fix-messages")
     async def ws_fix_messages(websocket: WebSocket):
         await ws_manager.connect(websocket, "fix-messages")
@@ -898,8 +907,7 @@ export interface ModifyOrderRequest {
 }
 
 export interface MarketDataUpdate {
-  type: "snapshot" | "update" | "error" | "maintenance" | "execution_report" | "order_cancel_reject";
-  // Market data fields
+  type: "snapshot" | "update" | "error" | "maintenance";
   symbol?: string;
   bids?: OrderBookEntry[];
   asks?: OrderBookEntry[];
@@ -913,9 +921,13 @@ export interface MarketDataUpdate {
   error?: string;
   error_code?: string;
   headline?: string;
-  // Order event fields
+}
+
+export interface OrderEvent {
+  type: "execution_report" | "order_cancel_reject";
   order?: OrderState;
   cl_ord_id?: string;
+  orig_cl_ord_id?: string;
   reason?: string;
   text?: string;
 }
@@ -1020,7 +1032,7 @@ git commit -m "feat: add order types and REST functions to frontend"
 - Modify: `frontend/src/hooks/useMarketData.ts`
 - Create: `frontend/src/hooks/useOrderEntry.ts`
 
-- [ ] **Step 1: Update `frontend/src/hooks/useMarketData.ts`** — accept `onOrderEvent` callback and forward order events:
+- [ ] **Step 1: Update `frontend/src/hooks/useMarketData.ts`** — no order event changes; only market data flows through this hook:
 
 ```typescript
 "use client";
@@ -1033,11 +1045,7 @@ import type { FIXMessage, MarketDataUpdate, OrderBook } from "@/lib/types";
 const MAX_FIX_MESSAGES = 500;
 const STATUS_POLL_INTERVAL = 5000;
 
-interface UseMarketDataOptions {
-  onOrderEvent?: (event: MarketDataUpdate) => void;
-}
-
-export function useMarketData({ onOrderEvent }: UseMarketDataOptions = {}) {
+export function useMarketData() {
   const [orderBooks, setOrderBooks] = useState<Record<string, OrderBook>>({});
   const [fixMessages, setFixMessages] = useState<FIXMessage[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1045,8 +1053,6 @@ export function useMarketData({ onOrderEvent }: UseMarketDataOptions = {}) {
   const [fixConnected, setFixConnected] = useState(false);
   const [oeConnected, setOeConnected] = useState(false);
   const fixConnectedRef = useRef(false);
-  const onOrderEventRef = useRef(onOrderEvent);
-  onOrderEventRef.current = onOrderEvent;
 
   const handleMarketData = useCallback((data: MarketDataUpdate) => {
     if (data.type === "snapshot" && data.symbol) {
@@ -1075,8 +1081,6 @@ export function useMarketData({ onOrderEvent }: UseMarketDataOptions = {}) {
       setError(data.error || "Unknown error");
     } else if (data.type === "maintenance") {
       setMaintenance(true);
-    } else if (data.type === "execution_report" || data.type === "order_cancel_reject") {
-      onOrderEventRef.current?.(data);
     }
   }, []);
 
@@ -1130,9 +1134,10 @@ export function useMarketData({ onOrderEvent }: UseMarketDataOptions = {}) {
 ```typescript
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
+import { useWebSocket } from "./useWebSocket";
 import { api } from "@/lib/api";
-import type { OrderState, PlaceOrderRequest, ModifyOrderRequest, MarketDataUpdate } from "@/lib/types";
+import type { OrderState, PlaceOrderRequest, ModifyOrderRequest, OrderEvent } from "@/lib/types";
 
 export function useOrderEntry() {
   const [orders, setOrders] = useState<Record<string, OrderState>>({});
@@ -1147,7 +1152,7 @@ export function useOrderEntry() {
     }
   }, []);
 
-  const handleOrderEvent = useCallback((event: MarketDataUpdate) => {
+  const handleOrderEvent = useCallback((event: OrderEvent) => {
     if (event.type === "execution_report" && event.order) {
       updateOrder(event.order);
     } else if (event.type === "order_cancel_reject") {
@@ -1157,6 +1162,8 @@ export function useOrderEntry() {
       });
     }
   }, [updateOrder]);
+
+  useWebSocket<OrderEvent>("/ws/orders", handleOrderEvent);
 
   const placeOrder = useCallback(async (req: PlaceOrderRequest) => {
     setLastResult(null);
@@ -1180,7 +1187,6 @@ export function useOrderEntry() {
   return {
     orders,
     lastResult,
-    handleOrderEvent,
     placeOrder,
     cancelOrder,
     modifyOrder,
@@ -1201,7 +1207,7 @@ Expected: all pass (hooks are not directly tested here; existing component tests
 
 ```bash
 git add frontend/src/hooks/useMarketData.ts frontend/src/hooks/useOrderEntry.ts
-git commit -m "feat: add useOrderEntry hook and wire order events through useMarketData"
+git commit -m "feat: add useOrderEntry hook with dedicated /ws/orders WebSocket connection"
 ```
 
 ---
@@ -1721,12 +1727,12 @@ const QUICK_ADD_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
 
 export default function Home() {
   const {
-    orders, lastResult, handleOrderEvent, placeOrder, cancelOrder, modifyOrder, massCancelAll, clearLastResult,
+    orders, lastResult, placeOrder, cancelOrder, modifyOrder, massCancelAll, clearLastResult,
   } = useOrderEntry();
 
   const {
     orderBooks, fixMessages, error, maintenance, connected, fixConnected, oeConnected, fixConnectedRef, clearError, clearMaintenance,
-  } = useMarketData({ onOrderEvent: handleOrderEvent });
+  } = useMarketData();
 
   const [activeSymbol, setActiveSymbol] = useState<string | null>(null);
   const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([]);

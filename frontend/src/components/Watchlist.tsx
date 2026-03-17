@@ -1,45 +1,16 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
 import type { OrderBook } from "@/lib/types";
-import { api } from "@/lib/api";
-
-const STORAGE_KEY = "fix-watchlist";
 
 interface WatchlistProps {
+  symbols: string[];
   orderBooks: Record<string, OrderBook>;
   activeSymbol: string | null;
   onSelect: (symbol: string) => void;
+  onRemove: (symbol: string) => void;
 }
 
-export default function Watchlist({ orderBooks, activeSymbol, onSelect }: WatchlistProps) {
-  const [symbols, setSymbols] = useState<string[]>([]);
-
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) setSymbols(parsed);
-      }
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(symbols));
-  }, [symbols]);
-
-  const addSymbol = useCallback(async (symbol: string) => {
-    if (symbols.includes(symbol)) return;
-    setSymbols((prev) => [...prev, symbol]);
-    try { await api.subscribe(symbol); } catch { /* handled via WS */ }
-  }, [symbols]);
-
-  const removeSymbol = useCallback(async (symbol: string) => {
-    setSymbols((prev) => prev.filter((s) => s !== symbol));
-    try { await api.unsubscribe(symbol); } catch { /* ignore */ }
-  }, []);
-
+export default function Watchlist({ symbols, orderBooks, activeSymbol, onSelect, onRemove }: WatchlistProps) {
   return (
     <div className="bg-terminal-panel border border-terminal-border rounded-lg overflow-hidden">
       <div className="px-4 py-2.5 border-b border-terminal-border flex items-center justify-between">
@@ -69,7 +40,7 @@ export default function Watchlist({ orderBooks, activeSymbol, onSelect }: Watchl
                   <span className="text-terminal-muted">{spread}</span>
                   <span className="text-terminal-ask">{ask?.price || "\u2014"}</span>
                   <button
-                    onClick={(e) => { e.stopPropagation(); removeSymbol(symbol); }}
+                    onClick={(e) => { e.stopPropagation(); onRemove(symbol); }}
                     className="text-terminal-muted hover:text-terminal-ask ml-2"
                     title="Remove from watchlist"
                   >
