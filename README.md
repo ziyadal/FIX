@@ -20,14 +20,17 @@ Most "FIX projects" stop at a library call. This one surfaces the protocol itsel
 
 ## Architecture
 
-```
-React / Next.js frontend
-   │   WebSocket (live prices + raw FIX messages)
-   │   REST (instrument search, snapshots, status)
-Python / FastAPI backend
-   │   FIX session manager · message parser · tag dictionary · WS relay
-   │   FIX 4.4 over TCP+TLS (port 9000)
-Binance Testnet  (fix-md.testnet.binance.vision:9000)
+```mermaid
+flowchart TD
+    FE["React / Next.js frontend<br/>order book · watchlist · FIX inspector"]
+    BE["Python / FastAPI backend<br/>FIX session manager · parser · tag dictionary · WS relay"]
+    BN["Binance Testnet<br/>fix-md.testnet.binance.vision:9000"]
+
+    FE -- "WebSocket — live prices + raw FIX messages" --> BE
+    FE -- "REST — instrument search · snapshots · status" --> BE
+    BE -- "FIX 4.4 over TCP + TLS (port 9000)" --> BN
+    BN -- "snapshots (W) + incremental refresh (X)" --> BE
+    BE -- "pushed updates" --> FE
 ```
 
 ---
